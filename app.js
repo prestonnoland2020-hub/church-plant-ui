@@ -552,24 +552,45 @@ async function compressImage(file) {
   return blob;
 }
 
+let preparingPhotos = false;
+
+function setPreparing(msg) {
+  preparingPhotos = !!msg;
+  $('photoCamera').disabled = preparingPhotos;
+  $('photoGallery').disabled = preparingPhotos;
+  $('photoStatus').textContent = msg || '';
+  $('photoStatus').hidden = !msg;
+}
+
 async function addPhotos(files) {
+  if (preparingPhotos) return;
   const room = MAX_PHOTOS - state.photos.length;
   const list = [...files].slice(0, Math.max(0, room));
   if (files.length > room) toast(`You can add up to ${MAX_PHOTOS} photos`);
   setErr('photos', '');
   const clientId = state.clientId;
-  for (const f of list) {
-    try {
-      const blob = await compressImage(f);
-      const id = newPhotoId();
-      await photoPut({ clientId, photoId: id, blob, uploaded: false });
+  try {
+    for (let i = 0; i < list.length; i++) {
+      setPreparing(list.length > 1 ? `Preparing photo ${i + 1} of ${list.length}…` : 'Preparing photo…');
+      await addOnePhoto(list[i], clientId);
       if (state.clientId !== clientId) return; // form was reset meanwhile
-      state.photos.push(id);
-      saveDraft();
-      renderPhotos();
-    } catch (e) {
-      setErr('photos', "A photo couldn't be read. Try a different photo.");
     }
+  } finally {
+    setPreparing('');
+  }
+}
+
+async function addOnePhoto(f, clientId) {
+  try {
+    const blob = await compressImage(f);
+    const id = newPhotoId();
+    await photoPut({ clientId, photoId: id, blob, uploaded: false });
+    if (state.clientId !== clientId) return; // form was reset meanwhile
+    state.photos.push(id);
+    saveDraft();
+    await renderPhotos();
+  } catch (e) {
+    setErr('photos', "A photo couldn't be read. Try a different photo.");
   }
 }
 
@@ -740,7 +761,8 @@ function validate() {
   else if (notes.length < 10) errs.notes = 'Notes must be at least 10 characters';
   else if (notes.length > 4000) errs.notes = 'Notes can be at most 4000 characters';
 
-  if (!state.photos.length) errs.photos = 'Add at least 1 photo';
+  if (preparingPhotos) errs.photos = 'Wait until the photos are ready';
+  else if (!state.photos.length) errs.photos = 'Add at least 1 photo';
   else if (state.photos.length > MAX_PHOTOS) errs.photos = `You can add up to ${MAX_PHOTOS} photos`;
 
   return errs;
