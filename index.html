@@ -119,6 +119,16 @@
   .stepper button { min-height: 56px; border: 1.5px solid var(--line); background: var(--card); border-radius: var(--radius); font-size: 26px; color: var(--green); font-weight: 600; }
   .stepper input { text-align: center; font-size: 22px; font-weight: 600; }
 
+  .photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+  .photo-grid:empty { display: none; }
+  .photo { position: relative; aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: #e3e8e4; }
+  .photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .photo button { position: absolute; top: 4px; right: 4px; width: 36px; height: 36px; border-radius: 50%; border: 0;
+    background: rgba(0,0,0,.6); color: #fff; font-size: 20px; line-height: 1; }
+  .field.invalid #photoBtns .btn { border-color: var(--error); }
+  #photoBtns .btn { font-size: 16px; margin: 0; }
+  .review-photos { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .review-photos img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; }
   .counter { text-align: right; color: var(--muted); font-size: 14px; margin-top: 4px; }
 
   dl.review { margin: 0 0 20px; background: var(--card); border: 1.5px solid var(--line); border-radius: var(--radius); }
@@ -267,6 +277,18 @@
         <textarea id="notes" maxlength="4000" placeholder="Tell the story of this group: how it started, what is happening now."></textarea>
         <div class="counter"><span id="notesCount">0</span> / 4000</div>
         <div class="err" id="e_notes"></div>
+      </div>
+
+      <div class="field" id="f_photos">
+        <span class="label">Photos <span class="opt" id="photoCount">(1 to 5)</span></span>
+        <div class="photo-grid" id="photoGrid"></div>
+        <div class="row" id="photoBtns">
+          <button type="button" class="btn secondary" id="photoCamera">Take photo</button>
+          <button type="button" class="btn secondary" id="photoGallery">From gallery</button>
+        </div>
+        <input type="file" id="photoInputCamera" accept="image/*" capture="environment" hidden>
+        <input type="file" id="photoInputGallery" accept="image/*" multiple hidden>
+        <div class="err" id="e_photos"></div>
       </div>
 
       <div class="field" id="f_by">

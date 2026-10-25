@@ -1,5 +1,5 @@
 // Keeps the app shell available offline. API calls (Supabase) are never cached.
-const CACHE = 'field-report-v1';
+const CACHE = 'field-report-v2';
 const SHELL = [
   './',
   './index.html',

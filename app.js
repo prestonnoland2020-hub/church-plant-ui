@@ -6,6 +6,9 @@ const SUPABASE_KEY = 'sb_publishable_w_lfSdz46qk8k5cFaRdW4A_O6qzGqFi';
 const MIN_YEAR = 2015;
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const COORD_MSG = 'Paste coordinates like 30.947157, 72.758333';
+const PHOTO_FN = `${SUPABASE_URL}/functions/v1/upload-photo`;
+const MAX_PHOTOS = 5;
+const PHOTO_MAX_PX = 1600;
 
 const LS = {
   team: 'fr_team',
@@ -177,6 +180,7 @@ function blankState() {
     year: '',
     attendees: '',
     notes: '',
+    photos: [],
     dupAck: false,
   };
 }
@@ -460,6 +464,203 @@ function cleanPhone(v, cc) {
   return s.replace(/^0+/, '');
 }
 
+/* ---------- Photos ----------
+   Compressed JPEGs live in IndexedDB (keyed client_id/photo_id) until the record is saved,
+   so they survive reloads and wait in the offline queue. state.photos holds only the ids. */
+const memPhotos = new Map(); // fallback when IndexedDB is unavailable, and a cache
+const photoUrls = new Map(); // photo_id -> object URL for thumbnails
+let idbPromise;
+
+function idb() {
+  if (!idbPromise) {
+    idbPromise = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open('field-report', 1);
+        req.onupgradeneeded = () => req.result.createObjectStore('photos', { keyPath: 'key' });
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+  return idbPromise;
+}
+
+async function idbRun(mode, fn) {
+  const db = await idb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('photos', mode);
+      const req = fn(tx.objectStore('photos'));
+      tx.oncomplete = () => resolve(req ? req.result : null);
+      tx.onerror = () => resolve(null);
+      tx.onabort = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+const photoKey = (clientId, photoId) => `${clientId}/${photoId}`;
+async function photoPut(rec) {
+  rec.key = photoKey(rec.clientId, rec.photoId);
+  memPhotos.set(rec.key, rec);
+  await idbRun('readwrite', (s) => s.put(rec));
+}
+async function photoGet(clientId, photoId) {
+  const k = photoKey(clientId, photoId);
+  return memPhotos.get(k) || (await idbRun('readonly', (s) => s.get(k)));
+}
+async function photoDel(clientId, photoId) {
+  const k = photoKey(clientId, photoId);
+  memPhotos.delete(k);
+  await idbRun('readwrite', (s) => s.delete(k));
+}
+const photoIdsOf = (payload) => (payload.photos || []).map((p) => p.split('/')[1].slice(0, 8));
+async function photoDelAll(payload) {
+  for (const id of photoIdsOf(payload)) await photoDel(payload.client_id, id);
+}
+
+function newPhotoId() {
+  return [...crypto.getRandomValues(new Uint8Array(4))].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+async function compressImage(file) {
+  let src;
+  try {
+    src = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch (e) {
+    src = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = URL.createObjectURL(file);
+    });
+  }
+  const w0 = src.naturalWidth || src.width;
+  const h0 = src.naturalHeight || src.height;
+  if (!w0 || !h0) throw new Error('empty image');
+  const scale = Math.min(1, PHOTO_MAX_PX / Math.max(w0, h0));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(w0 * scale);
+  canvas.height = Math.round(h0 * scale);
+  canvas.getContext('2d').drawImage(src, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+  if (!blob) throw new Error('encode failed');
+  return blob;
+}
+
+async function addPhotos(files) {
+  const room = MAX_PHOTOS - state.photos.length;
+  const list = [...files].slice(0, Math.max(0, room));
+  if (files.length > room) toast(`You can add up to ${MAX_PHOTOS} photos`);
+  setErr('photos', '');
+  const clientId = state.clientId;
+  for (const f of list) {
+    try {
+      const blob = await compressImage(f);
+      const id = newPhotoId();
+      await photoPut({ clientId, photoId: id, blob, uploaded: false });
+      if (state.clientId !== clientId) return; // form was reset meanwhile
+      state.photos.push(id);
+      saveDraft();
+      renderPhotos();
+    } catch (e) {
+      setErr('photos', "A photo couldn't be read. Try a different photo.");
+    }
+  }
+}
+
+async function removePhoto(id) {
+  state.photos = state.photos.filter((p) => p !== id);
+  await photoDel(state.clientId, id);
+  if (photoUrls.has(id)) { URL.revokeObjectURL(photoUrls.get(id)); photoUrls.delete(id); }
+  saveDraft();
+  renderPhotos();
+}
+
+function clearPhotoUrls() {
+  for (const u of photoUrls.values()) URL.revokeObjectURL(u);
+  photoUrls.clear();
+}
+
+async function renderPhotos() {
+  const clientId = state.clientId;
+  const grid = $('photoGrid');
+  const tiles = [];
+  for (const id of [...state.photos]) {
+    if (!photoUrls.has(id)) {
+      const rec = await photoGet(clientId, id);
+      if (!rec) { state.photos = state.photos.filter((p) => p !== id); saveDraft(); continue; }
+      photoUrls.set(id, URL.createObjectURL(rec.blob));
+    }
+    tiles.push(id);
+  }
+  if (state.clientId !== clientId) return;
+  grid.innerHTML = '';
+  tiles.forEach((id, i) => {
+    const d = document.createElement('div');
+    d.className = 'photo';
+    const img = document.createElement('img');
+    img.src = photoUrls.get(id);
+    img.alt = `Photo ${i + 1}`;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.setAttribute('aria-label', `Remove photo ${i + 1}`);
+    x.textContent = '×';
+    x.addEventListener('click', () => removePhoto(id));
+    d.append(img, x);
+    grid.appendChild(d);
+  });
+  const n = state.photos.length;
+  $('photoCount').textContent = n ? `(${n} of ${MAX_PHOTOS})` : `(1 to ${MAX_PHOTOS})`;
+  $('photoBtns').hidden = n >= MAX_PHOTOS;
+}
+
+/* Uploads one photo through the upload-photo Edge Function. Same result shape as rpc(). */
+async function uploadPhoto(team, clientId, photoId, blob) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 90000);
+  try {
+    const r = await fetch(`${PHOTO_FN}?client_id=${clientId}&photo_id=${photoId}`, {
+      method: 'POST',
+      headers: { 'x-team-code': team, apikey: SUPABASE_KEY, 'content-type': 'image/jpeg' },
+      body: blob,
+      signal: ctl.signal,
+    });
+    let body = {};
+    try { body = await r.json(); } catch (e) { /* not JSON */ }
+    if (r.ok) return { data: body };
+    if (r.status === 400 || r.status === 401) {
+      return { error: { code: body.code || '', message: body.message || 'A photo could not be uploaded' } };
+    }
+    return { netErr: true };
+  } catch (e) {
+    return { netErr: true };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* Uploads the record's photos (skipping ones already sent), then saves the record. */
+async function sendRecord(team, payload, onProgress) {
+  const ids = photoIdsOf(payload);
+  for (let i = 0; i < ids.length; i++) {
+    const rec = await photoGet(payload.client_id, ids[i]);
+    if (!rec) return { error: { code: '', message: 'A photo is missing on this phone. Add the photos again.' } };
+    if (rec.uploaded) continue;
+    if (onProgress) onProgress(i + 1, ids.length);
+    const res = await uploadPhoto(team, payload.client_id, ids[i], rec.blob);
+    if (!res.data) return res;
+    if (res.data.already_saved) break; // record was saved on an earlier try
+    rec.uploaded = true;
+    await photoPut(rec);
+  }
+  return rpc('submit_group', { p_team_code: team, p: payload });
+}
+
 /* ---------- Month / year ---------- */
 function renderDate() {
   const { y, m } = nowYM();
@@ -539,6 +740,9 @@ function validate() {
   else if (notes.length < 10) errs.notes = 'Notes must be at least 10 characters';
   else if (notes.length > 4000) errs.notes = 'Notes can be at most 4000 characters';
 
+  if (!state.photos.length) errs.photos = 'Add at least 1 photo';
+  else if (state.photos.length > MAX_PHOTOS) errs.photos = `You can add up to ${MAX_PHOTOS} photos`;
+
   return errs;
 }
 
@@ -556,6 +760,7 @@ function buildPayload() {
     longitude: state.lng,
     attendees: Number(state.attendees),
     notes: state.notes.trim(),
+    photos: state.photos.map((id) => `${state.clientId}/${id}.jpg`),
     submitted_by: collapse($('submittedBy').value) || null,
   };
   if (state.newLeader) {
@@ -570,6 +775,8 @@ function buildPayload() {
 /* Maps a server validation message to the field it belongs to. */
 function fieldForMessage(msg) {
   const s = (msg || '').toLowerCase();
+  if (/photo/.test(s)) return 'photos';
+  if (/note/.test(s)) return 'notes';
   if (/coordinat|latitude|longitude|location|inside/.test(s)) return 'coords';
   if (/country/.test(s)) return 'country';
   if (/region|state|province|division|area/.test(s)) return 'region';
@@ -578,7 +785,6 @@ function fieldForMessage(msg) {
   if (/leader|phone|mobile/.test(s)) return 'leader';
   if (/month|year|date|start/.test(s)) return 'date';
   if (/attend/.test(s)) return 'attendees';
-  if (/note/.test(s)) return 'notes';
   return null;
 }
 
@@ -618,6 +824,7 @@ function goReview() {
     ['Attendees', state.attendees],
   ];
   rows.push(['Notes', state.notes.trim()]);
+  rows.push(['Photos', null]);
   const by = collapse($('submittedBy').value);
   if (by) rows.push(['Your name', by]);
   if (dup.status === 'found') rows.push(['Nearby records', 'Confirmed this is a different group']);
@@ -630,7 +837,21 @@ function goReview() {
     const dt = document.createElement('dt');
     dt.textContent = k;
     const dd = document.createElement('dd');
-    dd.textContent = v;
+    if (k === 'Photos' && v === null) {
+      dd.textContent = `${state.photos.length} photo${state.photos.length === 1 ? '' : 's'}`;
+      const strip = document.createElement('div');
+      strip.className = 'review-photos';
+      for (const id of state.photos) {
+        if (!photoUrls.has(id)) continue;
+        const img = document.createElement('img');
+        img.src = photoUrls.get(id);
+        img.alt = '';
+        strip.appendChild(img);
+      }
+      dd.appendChild(strip);
+    } else {
+      dd.textContent = v;
+    }
     d.append(dt, dd);
     dl.appendChild(d);
   }
@@ -658,7 +879,9 @@ async function submit() {
   btn.textContent = 'Sending…';
   $('reviewError').hidden = true;
 
-  const res = navigator.onLine ? await rpc('submit_group', { p_team_code: team, p: payload }) : { netErr: true };
+  const res = navigator.onLine
+    ? await sendRecord(team, payload, (i, n) => { btn.textContent = `Uploading photo ${i} of ${n}…`; })
+    : { netErr: true };
 
   sending = false;
   btn.disabled = false;
@@ -701,6 +924,7 @@ function addSent(code, village) {
 
 function finishSuccess(data, payload) {
   addSent(data.code, payload.village_name);
+  photoDelAll(payload);
   $('doneCode').textContent = data.code;
   $('doneTitle').textContent = 'Saved';
   $('doneNote').textContent = data.already_saved
@@ -712,6 +936,7 @@ function finishSuccess(data, payload) {
 }
 
 function resetForm() {
+  clearPhotoUrls();
   state = blankState();
   save(LS.draft, null);
   resetDup();
@@ -737,12 +962,13 @@ async function flushQueue() {
   try {
     while (q.length) {
       const item = q[0];
-      const res = await rpc('submit_group', { p_team_code: item.team, p: item.payload });
+      const res = await sendRecord(item.team, item.payload);
       if (res.netErr) break;
       q = load(LS.queue, []).filter((it) => it.payload.client_id !== item.payload.client_id);
       save(LS.queue, q);
       if (res.data) {
         addSent(res.data.code, item.payload.village_name);
+        await photoDelAll(item.payload);
         toast(`Sent: ${item.payload.village_name} — ${res.data.code}`);
       } else {
         const failed = load(LS.failed, []);
@@ -794,6 +1020,7 @@ function renderQueue() {
         const f = load(LS.failed, []);
         f.splice(i, 1);
         save(LS.failed, f);
+        photoDelAll(it.payload);
         renderQueue();
       });
       a.append(open, del);
@@ -826,7 +1053,9 @@ function openFailed(i) {
     year: String(p.year_started || ''),
     attendees: String(p.attendees || ''),
     notes: p.notes || '',
+    photos: photoIdsOf(p),
   };
+  clearPhotoUrls();
   saveDraft();
   fillFormFromState();
   renderQueue();
@@ -860,6 +1089,7 @@ function fillFormFromState() {
   clearErrs();
   $('mapLink').hidden = true;
   renderDate();
+  renderPhotos();
   if (state.coordsRaw) onCoordsChanged(true);
   else applyCountry(null, true);
 }
@@ -1035,6 +1265,15 @@ function wire() {
     saveDraft();
   });
   $('submittedBy').addEventListener('input', (e) => save(LS.name, e.target.value));
+
+  for (const [btn, input] of [['photoCamera', 'photoInputCamera'], ['photoGallery', 'photoInputGallery']]) {
+    $(btn).addEventListener('click', () => $(input).click());
+    $(input).addEventListener('change', async (e) => {
+      const files = [...e.target.files];
+      e.target.value = '';
+      if (files.length) await addPhotos(files);
+    });
+  }
 
   $('mainForm').addEventListener('submit', (e) => { e.preventDefault(); goReview(); });
   $('submitBtn').addEventListener('click', submit);
