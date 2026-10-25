@@ -534,7 +534,10 @@ function validate() {
   if (!/^\d+$/.test(att)) errs.attendees = 'Enter the number of attendees';
   else if (Number(att) < 1 || Number(att) > 1000) errs.attendees = 'Attendees must be between 1 and 1000';
 
-  if (state.notes.length > 4000) errs.notes = 'Notes can be at most 4000 characters';
+  const notes = state.notes.trim();
+  if (!notes) errs.notes = 'Write some notes or a story about this group';
+  else if (notes.length < 10) errs.notes = 'Notes must be at least 10 characters';
+  else if (notes.length > 4000) errs.notes = 'Notes can be at most 4000 characters';
 
   return errs;
 }
@@ -552,7 +555,7 @@ function buildPayload() {
     latitude: state.lat,
     longitude: state.lng,
     attendees: Number(state.attendees),
-    notes: state.notes.trim() || null,
+    notes: state.notes.trim(),
     submitted_by: collapse($('submittedBy').value) || null,
   };
   if (state.newLeader) {
@@ -614,7 +617,7 @@ function goReview() {
     ['Started', `${MONTHS[Number(state.month) - 1]} ${state.year}`],
     ['Attendees', state.attendees],
   ];
-  if (state.notes.trim()) rows.push(['Notes', state.notes.trim()]);
+  rows.push(['Notes', state.notes.trim()]);
   const by = collapse($('submittedBy').value);
   if (by) rows.push(['Your name', by]);
   if (dup.status === 'found') rows.push(['Nearby records', 'Confirmed this is a different group']);
@@ -830,6 +833,7 @@ function openFailed(i) {
   const field = fieldForMessage(it.message);
   if (field) showFieldErrors({ [field]: it.message });
   else { $('formError').textContent = it.message; $('formError').hidden = false; }
+  if (!state.notes.trim()) setErr('notes', 'Notes are now required — add them before sending');
 }
 
 function renderSent() {
