@@ -18,6 +18,7 @@ const LS = {
   failed: 'fr_failed',
   sent: 'fr_sent',
   name: 'fr_name',
+  brand: 'fr_brand',
 };
 
 const sb = window.supabase
@@ -1333,7 +1334,46 @@ function wire() {
 }
 
 /* ---------- Start ---------- */
+/* ---------- Brand theme ----------
+   Saved by admins in the portal (Settings → Branding) and read here with portal_get_settings.
+   The last one is kept so the form looks right offline and on the next open before the network answers. */
+function applyBrand(b) {
+  const style = $('brand-theme');
+  const link = $('brand-font');
+  const logo = $('brandLogo');
+  const css = b && typeof b.css === 'string' && b.css.length < 20000 && !/[<>]|@import|url\s*\(|expression|javascript:|\\/i.test(b.css) ? b.css : null;
+  if (!css) {
+    if (style) style.remove();
+    if (link) link.remove();
+    logo.hidden = true;
+    return;
+  }
+  const st = style || document.head.appendChild(Object.assign(document.createElement('style'), { id: 'brand-theme' }));
+  if (st.textContent !== css) st.textContent = css;
+  const url = /^https:\/\/fonts\.googleapis\.com\//.test(b.fontUrl || '') ? b.fontUrl : null;
+  if (url) {
+    const l = link || document.head.appendChild(Object.assign(document.createElement('link'), { id: 'brand-font', rel: 'stylesheet' }));
+    if (l.href !== url) l.href = url;
+  } else if (link) link.remove();
+  if (/^(https:|data:image\/)/.test(b.logo || '')) { logo.src = b.logo; logo.hidden = false; } else logo.hidden = true;
+  if (b.accent) document.querySelector('meta[name=theme-color]').setAttribute('content', b.accent);
+}
+
+async function loadBrand() {
+  applyBrand(load(LS.brand, null));
+  if (!sb || !navigator.onLine) return;
+  try {
+    const { data, error } = await sb.rpc('portal_get_settings');
+    if (error) return;
+    const t = data && data.theme && data.theme.theme ? data.theme : null;
+    const b = t ? { css: t.css, fontUrl: t.theme.font_css_url, logo: t.logo || t.theme.logo_url || t.theme.icon_url || null, accent: t.theme.colors && t.theme.colors.light && t.theme.colors.light.accent } : null;
+    save(LS.brand, b);
+    applyBrand(b);
+  } catch (e) { /* keep the last saved look */ }
+}
+
 function init() {
+  loadBrand();
   wire();
   renderNet();
   const team = load(LS.team, null);
